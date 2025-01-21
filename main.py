@@ -14,8 +14,8 @@ app = Flask(__name__)
 CORS(app)
 
 # Azure Storage account URL and SAS token
-account_url = os.getenv('ACCOUNT_URL')
-sas_token = os.getenv('SAS_TOKEN')
+ACCOUNT_URL = os.getenv('ACCOUNT_URL')
+SAS_TOKEN = os.getenv('SAS_TOKEN')
 # Initialize Azure Blob Service client using account URL and SAS token
 blob_service_client = BlobServiceClient(account_url=f"{ACCOUNT_URL}?{SAS_TOKEN}")
 
