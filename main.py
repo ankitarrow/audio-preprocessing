@@ -95,7 +95,7 @@ def trim_audio():
 
 if __name__ == '__main__':
     app.run(
-        host='1.0.0.0',
+        host='0.0.0.0',
         port=5000,
         ssl_context=(
             '/etc/ssl/certs/selfsigned.crt',  # Path to the certificate file
