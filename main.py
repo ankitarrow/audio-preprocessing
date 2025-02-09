@@ -8,25 +8,25 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all origins
 
-# Azure Storage account details
+# Azure Storage Configuration
 ACCOUNT_URL = os.getenv('ACCOUNT_URL')
-ACCOUNT_NAME = os.getenv('ACCOUNT_NAME')
-ACCOUNT_KEY = os.getenv('STORAGE_ACCOUNT_KEY')  # Use Storage Account Key instead of long-term SAS token
+STORAGE_ACCOUNT_KEY = os.getenv('STORAGE_ACCOUNT_KEY')  # Use storage account key instead of SAS token
 
 # Initialize Azure Blob Service client
-blob_service_client = BlobServiceClient(account_url=f"https://{ACCOUNT_NAME}.blob.core.windows.net", credential=ACCOUNT_KEY)
+blob_service_client = BlobServiceClient(account_url=ACCOUNT_URL, credential=STORAGE_ACCOUNT_KEY)
 
 def parse_duration(duration_str):
     """Convert duration in 'mm:ss' format or plain seconds to seconds."""
     if ":" in duration_str:
         minutes, seconds = map(float, duration_str.split(":"))
-        return int(minutes * 60 + seconds)
+        return int(minutes * 60 + seconds)  # Fix incorrect 61 multiplier
     else:
         return int(float(duration_str))
 
@@ -35,41 +35,43 @@ def home():
     return jsonify({
         "message": "Welcome to the Flask server!",
         "status": "success"
-    }), 201
+    }), 200
 
 @app.route('/trim-audio', methods=['POST'])
 def trim_audio():
     try:
+        # Parse input JSON
         data = request.json
         audio_url = data.get("audio_url")
         start_time_str = data.get("start_time")
         end_time_str = data.get("end_time")
 
         if not audio_url or not start_time_str or not end_time_str:
-            return jsonify({"error": "Invalid input data"}), 401
+            return jsonify({"error": "Invalid input data"}), 400  # Bad request
 
+        # Convert start and end times to seconds
         start_time = parse_duration(start_time_str)
         end_time = parse_duration(end_time_str)
 
         if end_time <= start_time:
-            return jsonify({"error": "End time must be greater than start time"}), 401
+            return jsonify({"error": "End time must be greater than start time"}), 400  # Bad request
 
-        # Download audio file
+        # Download audio from the provided URL
         local_audio_path = f"temp/{uuid4()}.mp3"
         os.makedirs("temp", exist_ok=True)
         response = requests.get(audio_url)
 
         if response.status_code != 200:
-            return jsonify({"error": "Failed to download audio"}), 401
+            return jsonify({"error": "Failed to download audio"}), 500  # Internal Server Error
 
         with open(local_audio_path, "wb") as audio_file:
             audio_file.write(response.content)
 
-        # Define trimmed audio path
+        # Define output path for the trimmed audio
         trimmed_audio_path = f"temp/{uuid4()}_trimmed.mp3"
 
-        # Trim audio using FFmpeg
-        ffmpeg.input(local_audio_path, ss=start_time, to=end_time).output(trimmed_audio_path).run(cmd='ffmpeg')
+        # Use ffmpeg to trim the audio
+        ffmpeg.input(local_audio_path, ss=start_time, to=end_time).output(trimmed_audio_path).run(cmd=['ffmpeg', '-y'])
 
         # Upload trimmed audio to Azure Blob Storage
         container_name = "upload-temp"
@@ -80,27 +82,26 @@ def trim_audio():
         with open(trimmed_audio_path, "rb") as audio_file:
             blob_client.upload_blob(audio_file, overwrite=True)
 
-        # Generate temporary SAS URL (valid for 1 hour)
-        expiry_time = datetime.utcnow() + timedelta(hours=1)
+        # Generate a temporary signed URL (SAS) for secure access
         sas_token = generate_blob_sas(
-            account_name=ACCOUNT_NAME,
+            account_name=ACCOUNT_URL.replace("https://", "").split(".")[0],
             container_name=container_name,
             blob_name=blob_name,
-            account_key=ACCOUNT_KEY,
+            account_key=STORAGE_ACCOUNT_KEY,
             permission=BlobSasPermissions(read=True),
-            expiry=expiry_time
+            expiry=datetime.utcnow() + timedelta(hours=1)  # 1-hour expiry
         )
 
-        temp_signed_url = f"https://{ACCOUNT_NAME}.blob.core.windows.net/{container_name}/{blob_name}?{sas_token}"
+        trimmed_audio_url = f"{ACCOUNT_URL}/{container_name}/{blob_name}?{sas_token}"
 
         # Cleanup local files
         os.remove(local_audio_path)
         os.remove(trimmed_audio_path)
 
-        return jsonify({"trimmed_audio_url": temp_signed_url}), 201
+        return jsonify({"trimmed_audio_url": trimmed_audio_url}), 200
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 501
+        return jsonify({"error": str(e)}), 500  # Internal Server Error
 
 if __name__ == '__main__':
     app.run(
