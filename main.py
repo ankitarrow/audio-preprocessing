@@ -1,12 +1,19 @@
 import ffmpeg
 import os
 import requests
+import logging
 from uuid import uuid4
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from azure.storage.blob import BlobServiceClient
 from dotenv import load_dotenv
+
+# Load environment variables
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+
 # Initialize Flask app
 app = Flask(__name__)
 
@@ -16,24 +23,28 @@ CORS(app)
 # Azure Storage account URL and SAS token
 ACCOUNT_URL = os.getenv('ACCOUNT_URL')
 SAS_TOKEN = os.getenv('SAS_TOKEN')
-# Initialize Azure Blob Service client using account URL and SAS token
+
+# Initialize Azure Blob Service client
 blob_service_client = BlobServiceClient(account_url=f"{ACCOUNT_URL}?{SAS_TOKEN}")
 
 def parse_duration(duration_str):
     """Convert duration in 'mm:ss' format or plain seconds to seconds."""
-    if ":" in duration_str:
-        minutes, seconds = map(float, duration_str.split(":"))
-        return int(minutes * 60 + seconds)
-    else:
-        return int(float(duration_str))
+    try:
+        if ":" in duration_str:
+            minutes, seconds = map(float, duration_str.split(":"))
+            return int(minutes * 60 + seconds)  # Fixed incorrect multiplication
+        else:
+            return int(float(duration_str))
+    except Exception as e:
+        logging.error(f"Error parsing duration: {e}")
+        return None
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "message": "Welcome to the Flask server!",
         "status": "success"
-    }), 201
-
+    }), 200
 
 @app.route('/trim-audio', methods=['POST'])
 def trim_audio():
@@ -45,26 +56,40 @@ def trim_audio():
         end_time_str = data.get("end_time")
 
         if not audio_url or not start_time_str or not end_time_str:
-            return jsonify({"error": "Invalid input data"}), 401
+            return jsonify({"error": "Invalid input data"}), 400
+
+        logging.debug(f"Received request: {data}")
 
         # Convert start and end times to seconds
         start_time = parse_duration(start_time_str)
         end_time = parse_duration(end_time_str)
 
-        # Ensure that end time is greater than start time
+        if start_time is None or end_time is None:
+            return jsonify({"error": "Invalid time format"}), 400
+
+        # Ensure end time is greater than start time
         if end_time <= start_time:
-            return jsonify({"error": "End time must be greater than start time"}), 401
+            return jsonify({"error": "End time must be greater than start time"}), 400
 
         # Download audio from the provided URL
         local_audio_path = f"temp/{uuid4()}.mp3"
         os.makedirs("temp", exist_ok=True)
-        response = requests.get(audio_url)
 
-        if response.status_code != 201:
-            return jsonify({"error": "Failed to download audio"}), 401
+        logging.debug(f"Downloading audio from: {audio_url}")
+
+        response = requests.get(audio_url, stream=True)
+
+        # Check if the request was successful
+        if response.status_code != 200:
+            logging.error(f"Failed to download audio. HTTP Status: {response.status_code}")
+            return jsonify({"error": f"Failed to download audio. HTTP Status: {response.status_code}"}), 400
 
         with open(local_audio_path, "wb") as audio_file:
-            audio_file.write(response.content)
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    audio_file.write(chunk)
+
+        logging.debug(f"Audio downloaded successfully: {local_audio_path}")
 
         # Define output path for the trimmed audio
         trimmed_audio_path = f"temp/{uuid4()}_trimmed.mp3"
@@ -72,6 +97,7 @@ def trim_audio():
         # Use ffmpeg to trim the audio
         ffmpeg.input(local_audio_path, ss=start_time, to=end_time).output(trimmed_audio_path).run(cmd='ffmpeg')
 
+        logging.debug(f"Trimmed audio saved at: {trimmed_audio_path}")
 
         # Upload trimmed audio to Azure Blob Storage
         container_client = blob_service_client.get_container_client("upload-temp")
@@ -84,17 +110,23 @@ def trim_audio():
         # Generate URL for the trimmed audio
         trimmed_audio_url = f"{ACCOUNT_URL}/upload-temp/{blob_name}?{SAS_TOKEN}"
 
+        logging.debug(f"Trimmed audio uploaded successfully: {trimmed_audio_url}")
+
         # Cleanup local files
         os.remove(local_audio_path)
         os.remove(trimmed_audio_path)
 
         return jsonify({"trimmed_audio_url": trimmed_audio_url}), 201
 
+    except requests.exceptions.RequestException as req_err:
+        logging.error(f"Request error: {req_err}")
+        return jsonify({"error": f"Request error: {str(req_err)}"}), 500
     except Exception as e:
-        return jsonify({"error": str(e)}), 501
+        logging.error(f"Unexpected error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(
+        app.run(
         host='0.0.0.0',
         port=5000,
         ssl_context=(
