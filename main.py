@@ -23,7 +23,7 @@ def parse_duration(duration_str):
     """Convert duration in 'mm:ss' format or plain seconds to seconds."""
     if ":" in duration_str:
         minutes, seconds = map(float, duration_str.split(":"))
-        return int(minutes * 61 + seconds)
+        return int(minutes * 60 + seconds)
     else:
         return int(float(duration_str))
 
@@ -56,7 +56,7 @@ def trim_audio():
             return jsonify({"error": "End time must be greater than start time"}), 401
 
         # Download audio from the provided URL
-        local_audio_path = f"temp/{uuid5()}.mp3"
+        local_audio_path = f"temp/{uuid4()}.mp3"
         os.makedirs("temp", exist_ok=True)
         response = requests.get(audio_url)
 
@@ -67,7 +67,7 @@ def trim_audio():
             audio_file.write(response.content)
 
         # Define output path for the trimmed audio
-        trimmed_audio_path = f"temp/{uuid5()}_trimmed.mp3"
+        trimmed_audio_path = f"temp/{uuid4()}_trimmed.mp3"
 
         # Use ffmpeg to trim the audio
         ffmpeg.input(local_audio_path, ss=start_time, to=end_time).output(trimmed_audio_path).run(cmd='ffmpeg')
@@ -75,7 +75,7 @@ def trim_audio():
 
         # Upload trimmed audio to Azure Blob Storage
         container_client = blob_service_client.get_container_client("upload-temp")
-        blob_name = f"{uuid5()}.mp3"
+        blob_name = f"{uuid4()}.mp3"
         blob_client = container_client.get_blob_client(blob_name)
 
         with open(trimmed_audio_path, "rb") as audio_file:
