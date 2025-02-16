@@ -46,6 +46,192 @@ def home():
         "status": "success"
     }), 200
 
+@app.route('/remove-audio', methods=['POST'])
+def remove_audio():
+    try:
+        data = request.json
+        video_url = data.get("video_url")
+        
+        if not video_url:
+            return jsonify({"error": "Invalid input data"}), 400
+        
+        logging.debug(f"Received request to remove audio from: {video_url}")
+        
+        local_video_path = f"temp/{uuid4()}.mp4"
+        os.makedirs("temp", exist_ok=True)
+
+        response = requests.get(video_url, stream=True)
+        
+        if response.status_code != 200:
+            logging.error(f"Failed to download video. HTTP Status: {response.status_code}")
+            return jsonify({"error": f"Failed to download video. HTTP Status: {response.status_code}"}), 400
+
+        with open(local_video_path, "wb") as video_file:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    video_file.write(chunk)
+        
+        logging.debug(f"Video downloaded successfully: {local_video_path}")
+
+        # Define output path for the processed video
+        processed_video_path = f"temp/{uuid4()}_no_audio.mp4"
+
+        # Use ffmpeg to remove audio
+        ffmpeg.input(local_video_path).output(processed_video_path, an=None).run(cmd='ffmpeg')
+
+        logging.debug(f"Processed video saved at: {processed_video_path}")
+
+        # Upload processed video to Azure Blob Storage
+        container_client = blob_service_client.get_container_client("upload-temp")
+        blob_name = f"{uuid4()}.mp4"
+        blob_client = container_client.get_blob_client(blob_name)
+
+        with open(processed_video_path, "rb") as video_file:
+            blob_client.upload_blob(video_file, overwrite=True)
+
+        processed_video_url = f"{ACCOUNT_URL}/upload-temp/{blob_name}?{SAS_TOKEN}"
+        
+        logging.debug(f"Processed video uploaded successfully: {processed_video_url}")
+
+        # Cleanup local files
+        os.remove(local_video_path)
+        os.remove(processed_video_path)
+
+        return jsonify({"processed_video_url": processed_video_url}), 201
+
+    except requests.exceptions.RequestException as req_err:
+        logging.error(f"Request error: {req_err}")
+        return jsonify({"error": f"Request error: {str(req_err)}"}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/add-audio', methods=['POST'])
+def add_audio():
+    try:
+        data = request.json
+        video_url = data.get("video_url")
+        audio_url = data.get("audio_url")
+        
+        if not video_url or not audio_url:
+            return jsonify({"error": "Invalid input data"}), 400
+        
+        logging.debug(f"Received request to add audio {audio_url} to video {video_url}")
+        
+        # Download video and audio
+        local_video_path = f"temp/{uuid4()}.mp4"
+        local_audio_path = f"temp/{uuid4()}.mp3"
+        os.makedirs("temp", exist_ok=True)
+
+        for url, path in [(video_url, local_video_path), (audio_url, local_audio_path)]:
+            response = requests.get(url, stream=True)
+            if response.status_code != 200:
+                logging.error(f"Failed to download file from {url}. HTTP Status: {response.status_code}")
+                return jsonify({"error": f"Failed to download file from {url}. HTTP Status: {response.status_code}"}), 400
+            with open(path, "wb") as file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        file.write(chunk)
+        
+        logging.debug("Video and audio downloaded successfully")
+
+        # Define output path for the processed video
+        output_video_path = f"temp/{uuid4()}_with_audio.mp4"
+
+        # Use ffmpeg to add audio to video
+        ffmpeg.input(local_video_path).input(local_audio_path).output(output_video_path, codec='copy').run(cmd='ffmpeg')
+
+        logging.debug(f"Processed video saved at: {output_video_path}")
+
+        # Upload processed video to Azure Blob Storage
+        container_client = blob_service_client.get_container_client("upload-temp")
+        blob_name = f"{uuid4()}.mp4"
+        blob_client = container_client.get_blob_client(blob_name)
+
+        with open(output_video_path, "rb") as video_file:
+            blob_client.upload_blob(video_file, overwrite=True)
+
+        output_video_url = f"{ACCOUNT_URL}/upload-temp/{blob_name}?{SAS_TOKEN}"
+        
+        logging.debug(f"Processed video uploaded successfully: {output_video_url}")
+
+        # Cleanup local files
+        os.remove(local_video_path)
+        os.remove(local_audio_path)
+        os.remove(output_video_path)
+
+        return jsonify({"processed_video_url": output_video_url}), 201
+
+    except requests.exceptions.RequestException as req_err:
+        logging.error(f"Request error: {req_err}")
+        return jsonify({"error": f"Request error: {str(req_err)}"}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/trim-video', methods=['POST'])
+def trim_video():
+    try:
+        data = request.json
+        video_url = data.get("video_url")
+        start_time = data.get("start_time")
+        end_time = data.get("end_time")
+        start_time = parse_duration(start_time)
+        end_time = parse_duration(end_time)
+        if not video_url or start_time is None or end_time is None:
+            return jsonify({"error": "Invalid input data"}), 400
+        
+        logging.debug(f"Received request to trim video {video_url} from {start_time} to {end_time}")
+        
+        # Download video
+        local_video_path = f"temp/{uuid4()}.mp4"
+        os.makedirs("temp", exist_ok=True)
+
+        response = requests.get(video_url, stream=True)
+        if response.status_code != 200:
+            logging.error(f"Failed to download video. HTTP Status: {response.status_code}")
+            return jsonify({"error": f"Failed to download video. HTTP Status: {response.status_code}"}), 400
+        
+        with open(local_video_path, "wb") as video_file:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    video_file.write(chunk)
+        
+        logging.debug("Video downloaded successfully")
+
+        # Define output path for the trimmed video
+        trimmed_video_path = f"temp/{uuid4()}_trimmed.mp4"
+
+        # Use ffmpeg to trim the video
+        ffmpeg.input(local_video_path, ss=start_time, to=end_time).output(trimmed_video_path, codec='copy').run(cmd='ffmpeg')
+
+        logging.debug(f"Trimmed video saved at: {trimmed_video_path}")
+
+        # Upload trimmed video to Azure Blob Storage
+        container_client = blob_service_client.get_container_client("upload-temp")
+        blob_name = f"{uuid4()}.mp4"
+        blob_client = container_client.get_blob_client(blob_name)
+
+        with open(trimmed_video_path, "rb") as video_file:
+            blob_client.upload_blob(video_file, overwrite=True)
+
+        trimmed_video_url = f"{ACCOUNT_URL}/upload-temp/{blob_name}?{SAS_TOKEN}"
+        
+        logging.debug(f"Trimmed video uploaded successfully: {trimmed_video_url}")
+
+        # Cleanup local files
+        os.remove(local_video_path)
+        os.remove(trimmed_video_path)
+
+        return jsonify({"processed_video_url": trimmed_video_url}), 201
+
+    except requests.exceptions.RequestException as req_err:
+        logging.error(f"Request error: {req_err}")
+        return jsonify({"error": f"Request error: {str(req_err)}"}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        return jsonify({"error": str(e)}), 500
+                
 @app.route('/trim-audio', methods=['POST'])
 def trim_audio():
     try:
